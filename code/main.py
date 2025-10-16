@@ -162,6 +162,9 @@ parser.add_argument("--gpu", default=0, type=int, help="GPU ID to use.")
 
 # main function for training and testing
 def main(args):
+    # check the availability of GPU
+    device = torch.device("cuda" if torch.cuda.is_available() and args.gpu >= 0 else "cpu")
+
     # parse args
     best_acc1 = 0.0
 
@@ -197,9 +200,9 @@ def main(args):
         model_arch = "CNN"
     criterion = nn.CrossEntropyLoss()
     # put everthing to gpu
-    if args.gpu >= 0:
-        model = model.cuda(args.gpu)
-        criterion = criterion.cuda(args.gpu)
+    model = model.to(device)
+    criterion = criterion.to(device)
+
 
     # setup the optimizer
     if not args.use_vit:
@@ -272,7 +275,8 @@ def main(args):
             if args.gpu < 0:
                 model = model.cpu()
             else:
-                model = model.cuda(args.gpu)
+                # move model to the configured device
+                model = model.to(device)
             # only load the optimizer if necessary
             if (not args.evaluate) and (not args.attack):
                 optimizer.load_state_dict(checkpoint["optimizer"])
@@ -384,6 +388,8 @@ def save_checkpoint(
 
 def train(train_loader, model, criterion, optimizer, scheduler, epoch, args, writer):
     """Training the model"""
+    # ensure we move inputs to the same device as the model
+    device = next(model.parameters()).device
     # adjust the learning rate
     num_iters = len(train_loader)
 
@@ -406,8 +412,9 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, args, wri
 
         # data -> GPU
         if args.gpu >= 0:
-            input = input.cuda(args.gpu, non_blocking=True)
-            target = target.cuda(args.gpu, non_blocking=True)
+            # move tensors to the configured device
+            input = input.to(device, non_blocking=True)
+            target = target.to(device, non_blocking=True)
 
         # compute output
         output = model(input)
@@ -432,7 +439,8 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, args, wri
         scheduler.step()
 
         # measure elapsed time
-        torch.cuda.synchronize()
+        if torch.cuda.is_available() and args.gpu >= 0:
+            torch.cuda.synchronize()
         batch_time.update(time.time() - end)
         end = time.time()
 
@@ -479,6 +487,8 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, args, wri
 
 def validate(val_loader, model, epoch, args, writer, attacker=None, visualizer=None):
     """Test the model on the validation set"""
+    # ensure we move inputs to the same device as the model
+    device = next(model.parameters()).device
     batch_time = AverageMeter()
     top1 = AverageMeter()
     top5 = AverageMeter()
@@ -493,8 +503,9 @@ def validate(val_loader, model, epoch, args, writer, attacker=None, visualizer=N
         # loop over validation set
         for i, (input, target) in enumerate(val_loader):
             if args.gpu >= 0:
-                input = input.cuda(args.gpu, non_blocking=False)
-                target = target.cuda(args.gpu, non_blocking=False)
+                # move tensors to the configured device
+                input = input.to(device, non_blocking=False)
+                target = target.to(device, non_blocking=False)
 
             # generate adversarial samples
             if attacker is not None:
@@ -518,7 +529,8 @@ def validate(val_loader, model, epoch, args, writer, attacker=None, visualizer=N
             top5.update(acc5.item(), input.size(0))
 
             # measure elapsed time
-            torch.cuda.synchronize()
+            if torch.cuda.is_available() and args.gpu >= 0:
+                torch.cuda.synchronize()
             batch_time.update(time.time() - end)
             end = time.time()
 
