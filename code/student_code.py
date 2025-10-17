@@ -299,9 +299,27 @@ class Attention(nn.Module):
         # q, k, v with shape (B * nHead, H * W, C)
         q, k, v = qkv.reshape(3, B * self.num_heads, H * W, -1).unbind(0)
         ########################################################################
-        # Fill in the code here
-        ########################################################################
-        return x
+        # compute scaled dot-product attention per head
+        # q, k, v: (B * num_heads, N, head_dim) where N = H*W
+        N = H * W
+        # attention scores: (B * num_heads, N, N)
+        attn = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+        # numerical stability: subtract max before softmax
+        attn = attn - attn.max(dim=-1, keepdim=True)[0]
+        attn = torch.softmax(attn, dim=-1)
+
+        # attention weighted values
+        out = torch.matmul(attn, v)  # (B * num_heads, N, head_dim)
+
+        # reshape: combine heads
+        out = out.view(B, self.num_heads, N, -1).permute(0, 2, 1, 3).reshape(B, N, -1)
+
+        # final linear projection
+        out = self.proj(out)  # (B, N, dim)
+
+        # reshape back to (B, H, W, C)
+        out = out.view(B, H, W, -1)
+        return out
 
 class TransformerBlock(nn.Module):
     """Transformer blocks with support of local window self-attention"""
@@ -351,7 +369,31 @@ class TransformerBlock(nn.Module):
         x = self.norm1(x)
 
         ########################################################################
-        # Fill in the code here
+        # support local window attention if window_size > 0
+        if self.window_size and self.window_size > 0:
+            # x: B, H, W, C -> partition into windows
+            B, H, W, C = x.shape
+            windows, pad_hw = window_partition(x, self.window_size)
+            # windows: [B * num_windows, Ws, Ws, C] -> reshape to [B*num_windows, Ws*Ws, C]
+            ws = self.window_size
+            windows_flat = windows.view(windows.size(0), ws * ws, C)
+            # apply attention (Attention expects B,H,W,C input). We reshape back
+            num_windows = windows.size(0)
+            attn_in = windows_flat.view(num_windows, ws, ws, C)
+            attn_out = self.attn(attn_in)
+            # unpartition
+            attn_out = attn_out.view(num_windows, ws * ws, C)
+            attn_out = attn_out.view(num_windows, ws, ws, C)
+            x = window_unpartition(attn_out, self.window_size, pad_hw, (H, W))
+        else:
+            # global attention: attn expects (B, H, W, C)
+            x = self.attn(x)
+
+        # residual + drop path
+        x = shortcut + self.drop_path(x)
+
+        # MLP block with pre-norm
+        x = x + self.drop_path(self.mlp(self.norm2(x)))
         ########################################################################
         # The implementation shall support local self-attention
         # (also known as window attention)
@@ -439,7 +481,26 @@ class SimpleViT(nn.Module):
         )
 
         ########################################################################
-        # Fill in the code here
+        # Build Transformer blocks
+        self.blocks = nn.ModuleList()
+        for i in range(depth):
+            use_window = i in window_block_indexes
+            ws = window_size if use_window else 0
+            blk = TransformerBlock(
+                dim=embed_dim,
+                num_heads=num_heads,
+                mlp_ratio=mlp_ratio,
+                qkv_bias=qkv_bias,
+                drop_path=dpr[i],
+                norm_layer=norm_layer,
+                act_layer=act_layer,
+                window_size=ws,
+            )
+            self.blocks.append(blk)
+
+        # final normalization and classification head
+        self.norm = norm_layer(embed_dim)
+        self.head = nn.Linear(embed_dim, num_classes)
         ########################################################################
         # The implementation shall define some Transformer blocks
 
@@ -460,8 +521,24 @@ class SimpleViT(nn.Module):
 
     def forward(self, x):
         ########################################################################
-        # Fill in the code here
-        ########################################################################
+        # x: B, C, H, W
+        B = x.size(0)
+        x = self.patch_embed(x)  # B, Hp, Wp, C
+
+        if self.pos_embed is not None:
+            x = x + self.pos_embed
+
+        # pass through transformer blocks
+        for blk in self.blocks:
+            x = blk(x)
+
+        # final norm
+        x = self.norm(x)
+
+        # global average pool over spatial dims (H, W)
+        x = x.mean(dim=(1, 2))  # B, C
+
+        x = self.head(x)
         return x
 
 # change this to your model!
